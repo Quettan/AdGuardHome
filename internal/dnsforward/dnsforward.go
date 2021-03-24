@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,6 +57,8 @@ type Server struct {
 	stats      stats.Stats
 	access     *accessCtx
 
+	autohostSuffix string
+
 	ipset ipsetCtx
 
 	tableHostToIP     map[string]net.IP // "hostname -> IP" table for internal addresses (DHCP)
@@ -74,21 +77,38 @@ type Server struct {
 	conf ServerConfig
 }
 
-// DNSCreateParams - parameters for NewServer()
+const defaultAutohostSuffix = ".lan."
+
+// DNSCreateParams are parameters to create a new server.
 type DNSCreateParams struct {
-	DNSFilter  *dnsfilter.DNSFilter
-	Stats      stats.Stats
-	QueryLog   querylog.QueryLog
-	DHCPServer dhcpd.ServerInterface
+	DNSFilter   *dnsfilter.DNSFilter
+	Stats       stats.Stats
+	QueryLog    querylog.QueryLog
+	DHCPServer  dhcpd.ServerInterface
+	AutohostTLD string
 }
 
 // NewServer creates a new instance of the dnsforward.Server
 // Note: this function must be called only once
 func NewServer(p DNSCreateParams) *Server {
+	var autohostSuffix string
+	if p.AutohostTLD == "" {
+		autohostSuffix = defaultAutohostSuffix
+	} else {
+		b := &strings.Builder{}
+		b.Grow(len(p.AutohostTLD) + 2)
+		_, _ = b.WriteString(".")
+		_, _ = b.WriteString(p.AutohostTLD)
+		_, _ = b.WriteString(".")
+
+		autohostSuffix = b.String()
+	}
+
 	s := &Server{
-		dnsFilter: p.DNSFilter,
-		stats:     p.Stats,
-		queryLog:  p.QueryLog,
+		dnsFilter:      p.DNSFilter,
+		stats:          p.Stats,
+		queryLog:       p.QueryLog,
+		autohostSuffix: autohostSuffix,
 	}
 
 	if p.DHCPServer != nil {

@@ -15,6 +15,8 @@ import (
 
 // To transfer information between modules
 type dnsContext struct {
+	// TODO(a.garipov): Remove this and rewrite processors to be methods of
+	// *Server instead.
 	srv      *Server
 	proxyCtx *proxy.DNSContext
 	// setts are the filtering settings for the client.
@@ -75,7 +77,7 @@ func (s *Server) handleDNSRequest(_ *proxy.Proxy, d *proxy.DNSContext) error {
 	// appropriate handler.
 	mods := []modProcessFunc{
 		processInitial,
-		processInternalHosts,
+		s.processInternalHosts,
 		processInternalIPAddrs,
 		processClientID,
 		processFilteringBeforeRequest,
@@ -136,7 +138,7 @@ func isHostnameOK(hostname string) bool {
 			(c >= 'A' && c <= 'Z') ||
 			(c >= '0' && c <= '9') ||
 			c == '.' || c == '-') {
-			log.Debug("DNS: skipping invalid hostname %s from DHCP", hostname)
+			log.Debug("dns: skipping invalid hostname %s from DHCP", hostname)
 			return false
 		}
 	}
@@ -172,7 +174,7 @@ func (s *Server) onDHCPLeaseChanged(flags int) {
 		hostToIP[lowhost] = ip
 	}
 
-	log.Debug("DNS: added %d A/PTR entries from DHCP", len(m))
+	log.Debug("dns: added %d A/PTR entries from DHCP", len(m))
 
 	s.tableHostToIPLock.Lock()
 	s.tableHostToIP = hostToIP
@@ -183,20 +185,20 @@ func (s *Server) onDHCPLeaseChanged(flags int) {
 	s.tablePTRLock.Unlock()
 }
 
-// Respond to A requests if the target host name is associated with a lease from our DHCP server
-func processInternalHosts(ctx *dnsContext) (rc resultCode) {
-	s := ctx.srv
+// processInternalHosts respond to A and AAAA requests if the target hostname
+// is known to the server.
+func (s *Server) processInternalHosts(ctx *dnsContext) (rc resultCode) {
 	req := ctx.proxyCtx.Req
-	if !(req.Question[0].Qtype == dns.TypeA || req.Question[0].Qtype == dns.TypeAAAA) {
+	q := req.Question[0]
+	if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA {
 		return resultCodeSuccess
 	}
 
-	host := req.Question[0].Name
-	host = strings.ToLower(host)
-	if !strings.HasSuffix(host, ".lan.") {
+	reqHost := strings.ToLower(q.Name)
+	host := strings.TrimSuffix(reqHost, s.autohostSuffix)
+	if host == reqHost {
 		return resultCodeSuccess
 	}
-	host = strings.TrimSuffix(host, ".lan.")
 
 	s.tableHostToIPLock.Lock()
 	if s.tableHostToIP == nil {
@@ -209,24 +211,27 @@ func processInternalHosts(ctx *dnsContext) (rc resultCode) {
 		return resultCodeSuccess
 	}
 
-	log.Debug("DNS: internal record: %s -> %s", req.Question[0].Name, ip)
+	log.Debug("dns: internal record: %s -> %s", req.Question[0].Name, ip)
 
 	resp := s.makeResponse(req)
 
-	if req.Question[0].Qtype == dns.TypeA {
-		a := &dns.A{}
-		a.Hdr = dns.RR_Header{
-			Name:   req.Question[0].Name,
-			Rrtype: dns.TypeA,
-			Ttl:    s.conf.BlockedResponseTTL,
-			Class:  dns.ClassINET,
+	if q.Qtype == dns.TypeA {
+		a := &dns.A{
+			Hdr: dns.RR_Header{
+				Name:   q.Name,
+				Rrtype: dns.TypeA,
+				Ttl:    s.conf.BlockedResponseTTL,
+				Class:  dns.ClassINET,
+			},
 		}
-		a.A = make([]byte, 4)
+
+		a.A = make([]byte, len(ip))
 		copy(a.A, ip)
 		resp.Answer = append(resp.Answer, a)
 	}
 
 	ctx.proxyCtx.Res = resp
+
 	return resultCodeSuccess
 }
 
@@ -257,7 +262,7 @@ func processInternalIPAddrs(ctx *dnsContext) (rc resultCode) {
 		return resultCodeSuccess
 	}
 
-	log.Debug("DNS: reverse-lookup: %s -> %s", arpa, host)
+	log.Debug("dns: reverse-lookup: %s -> %s", arpa, host)
 
 	resp := s.makeResponse(req)
 	ptr := &dns.PTR{}
@@ -325,7 +330,7 @@ func processUpstream(ctx *dnsContext) (rc resultCode) {
 	if s.conf.EnableDNSSEC {
 		opt := d.Req.IsEdns0()
 		if opt == nil {
-			log.Debug("DNS: Adding OPT record with DNSSEC flag")
+			log.Debug("dns: Adding OPT record with DNSSEC flag")
 			d.Req.SetEdns0(4096, true)
 		} else if !opt.Do() {
 			opt.SetDo(true)
