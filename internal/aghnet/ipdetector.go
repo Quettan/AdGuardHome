@@ -9,12 +9,13 @@ import (
 type IPDetector struct {
 	// spNets is the slice of special-purpose address registries as defined
 	// by RFC-6890 (https://tools.ietf.org/html/rfc6890).
-	spNets   []*net.IPNet
-	spNetsMu sync.Mutex
+	spNets []*net.IPNet
 
 	// locServedNets is the slice of locally-served networks as defined by
 	// RFC-6303 (https://tools.ietf.org/html/rfc6303).
-	locServedNets   []*net.IPNet
+	locServedNets []*net.IPNet
+
+	spNetsMu        sync.Mutex
 	locServedNetsMu sync.Mutex
 }
 
@@ -133,6 +134,8 @@ func NewIPDetector() (ipd *IPDetector, err error) {
 
 // detectLocked ranges through the given ipnets slice searching for the one
 // which contains the ip.  For internal use only.
+//
+// TODO(e.burkov): Think about memoization.
 func detectLocked(ipnets *[]*net.IPNet, ip net.IP) (is bool) {
 	for _, ipnet := range *ipnets {
 		if ipnet.Contains(ip) {
@@ -143,17 +146,17 @@ func detectLocked(ipnets *[]*net.IPNet, ip net.IP) (is bool) {
 	return false
 }
 
-// DetectSpecialNetwork returns true if IP address is contained by any of
+// IsSpecialNetwork returns true if IP address is contained by any of
 // special-purpose IP address registries.  It's safe for concurrent use.
-func (ipd *IPDetector) DetectSpecialNetwork(ip net.IP) (is bool) {
+func (ipd *IPDetector) IsSpecialNetwork(ip net.IP) (is bool) {
 	ipd.spNetsMu.Lock()
 	defer ipd.spNetsMu.Unlock()
 	return detectLocked(&ipd.spNets, ip)
 }
 
-// DetectLocallyServedNetwork returns true if IP address is contained by any of
+// IsLocallyServedNetwork returns true if IP address is contained by any of
 // locally-served IP address registries.  It's safe for concurrent use.
-func (ipd *IPDetector) DetectLocallyServedNetwork(ip net.IP) (is bool) {
+func (ipd *IPDetector) IsLocallyServedNetwork(ip net.IP) (is bool) {
 	ipd.locServedNetsMu.Lock()
 	defer ipd.locServedNetsMu.Unlock()
 	return detectLocked(&ipd.locServedNets, ip)

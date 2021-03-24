@@ -63,6 +63,7 @@ type homeContext struct {
 
 	ipDetector      *aghnet.IPDetector
 	systemResolvers aghnet.SystemResolvers
+	localResolvers  aghnet.LocalResolvers
 
 	// mux is our custom http.ServeMux.
 	mux *http.ServeMux
@@ -221,6 +222,33 @@ func setupConfig(args options) {
 	}
 }
 
+const defaultLocalTimeout = 5 * time.Second
+
+func setupResolvers() {
+	// TODO(e.burkov): Enhance when the config will contain local resolvers
+	// addresses.
+
+	sysRes, err := aghnet.NewSystemResolvers(0, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	Context.systemResolvers = sysRes
+
+	var addrs []string
+	for _, addr := range sysRes.Get() {
+		if addr == config.DNS.BindHost.String() {
+			continue
+		}
+
+		addrs = append(addrs, addr)
+	}
+
+	Context.localResolvers, err = aghnet.NewLocalResolvers(addrs, defaultLocalTimeout)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 // run performs configurating and starts AdGuard Home.
 func run(args options) {
 	// configure config filename
@@ -311,12 +339,7 @@ func run(args options) {
 		log.Fatal(err)
 	}
 
-	Context.systemResolvers, err = aghnet.NewSystemResolvers(0, nil)
-	if err != nil {
-		// TODO(e.burkov): Think if we really need fatal here since
-		// local resolvers may be also configured via configuration.
-		log.Fatal(err)
-	}
+	setupResolvers()
 
 	if !Context.firstRun {
 		err = initDNSServer()

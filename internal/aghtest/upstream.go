@@ -71,7 +71,7 @@ func (u *TestUpstream) Exchange(m *dns.Msg) (resp *dns.Msg, err error) {
 		for _, n := range names {
 			resp.Answer = append(resp.Answer, &dns.PTR{
 				Hdr: dns.RR_Header{
-					Name:   name,
+					Name:   n,
 					Rrtype: rrType,
 				},
 				Ptr: n,

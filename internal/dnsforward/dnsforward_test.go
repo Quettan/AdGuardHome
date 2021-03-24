@@ -70,14 +70,10 @@ func createTestServer(t *testing.T, filterConf *dnsfilter.Config, forwardConf Se
 	require.NoError(t, err)
 	require.NotNil(t, ipd)
 
-	sysRes, err := aghnet.NewSystemResolvers(0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, sysRes)
-
 	s := NewServer(DNSCreateParams{
-		DNSFilter:       f,
-		IPDetector:      ipd,
-		SystemResolvers: sysRes,
+		DNSFilter:      f,
+		IPDetector:     ipd,
+		LocalResolvers: &aghtest.LocalResolvers{},
 	})
 	s.conf = forwardConf
 	require.Nil(t, s.Prepare(nil))
@@ -720,14 +716,10 @@ func TestBlockedCustomIP(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ipd)
 
-	sysRes, err := aghnet.NewSystemResolvers(0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, sysRes)
-
 	s := NewServer(DNSCreateParams{
-		DNSFilter:       dnsfilter.New(&dnsfilter.Config{}, filters),
-		IPDetector:      ipd,
-		SystemResolvers: sysRes,
+		DNSFilter:      dnsfilter.New(&dnsfilter.Config{}, filters),
+		IPDetector:     ipd,
+		LocalResolvers: &aghtest.LocalResolvers{},
 	})
 	conf := &ServerConfig{
 		UDPListenAddr: &net.UDPAddr{},
@@ -849,14 +841,10 @@ func TestRewrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ipd)
 
-	sysRes, err := aghnet.NewSystemResolvers(0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, sysRes)
-
 	s := NewServer(DNSCreateParams{
-		DNSFilter:       f,
-		IPDetector:      ipd,
-		SystemResolvers: sysRes,
+		DNSFilter:      f,
+		IPDetector:     ipd,
+		LocalResolvers: &aghtest.LocalResolvers{},
 	})
 	assert.Nil(t, s.Prepare(&ServerConfig{
 		UDPListenAddr: &net.UDPAddr{},
@@ -1143,15 +1131,11 @@ func TestPTRResponseFromDHCPLeases(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ipd)
 
-	sysRes, err := aghnet.NewSystemResolvers(0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, sysRes)
-
 	s := NewServer(DNSCreateParams{
-		DNSFilter:       dnsfilter.New(&dnsfilter.Config{}, nil),
-		DHCPServer:      &testDHCP{},
-		IPDetector:      ipd,
-		SystemResolvers: sysRes,
+		DNSFilter:      dnsfilter.New(&dnsfilter.Config{}, nil),
+		DHCPServer:     &testDHCP{},
+		IPDetector:     ipd,
+		LocalResolvers: &aghtest.LocalResolvers{},
 	})
 
 	s.conf.UDPListenAddr = &net.UDPAddr{}
@@ -1203,14 +1187,10 @@ func TestPTRResponseFromHosts(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ipd)
 
-	sysRes, err := aghnet.NewSystemResolvers(0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, sysRes)
-
 	s := NewServer(DNSCreateParams{
-		DNSFilter:       dnsfilter.New(&c, nil),
-		IPDetector:      ipd,
-		SystemResolvers: sysRes,
+		DNSFilter:      dnsfilter.New(&c, nil),
+		IPDetector:     ipd,
+		LocalResolvers: &aghtest.LocalResolvers{},
 	})
 	s.conf.UDPListenAddr = &net.UDPAddr{}
 	s.conf.TCPListenAddr = &net.TCPAddr{}
@@ -1235,4 +1215,75 @@ func TestPTRResponseFromHosts(t *testing.T) {
 	ptr, ok := resp.Answer[0].(*dns.PTR)
 	require.True(t, ok)
 	assert.Equal(t, "host.", ptr.Ptr)
+}
+
+func TestLocalRestriction(t *testing.T) {
+	s := createTestServer(t, &dnsfilter.Config{}, ServerConfig{
+		UDPListenAddr: &net.UDPAddr{},
+		TCPListenAddr: &net.TCPAddr{},
+	})
+	ups := &aghtest.TestUpstream{
+		Reverse: map[string][]string{
+			"251.252.253.254.in-addr.arpa.": {"host1.example.net."},
+			"1.1.168.192.in-addr.arpa.":     {"some.local-client."},
+		},
+	}
+	s.localResolvers = &aghtest.LocalResolvers{Ups: ups}
+	s.conf.UpstreamConfig.Upstreams = []upstream.Upstream{ups}
+	startDeferStop(t, s)
+
+	testCases := []struct {
+		name     string
+		want     string
+		question net.IP
+		cliIP    net.IP
+		wantLen  int
+	}{{
+		name:     "from_local_to_external",
+		want:     "host1.example.net.",
+		question: net.IP{254, 253, 252, 251},
+		cliIP:    net.IP{192, 168, 10, 10},
+		wantLen:  1,
+	}, {
+		name:     "from_external_for_local",
+		want:     "",
+		question: net.IP{192, 168, 1, 1},
+		cliIP:    net.IP{254, 253, 252, 251},
+		wantLen:  0,
+	}, {
+		name:     "from_local_for_local",
+		want:     "some.local-client.",
+		question: net.IP{192, 168, 1, 1},
+		cliIP:    net.IP{192, 168, 1, 2},
+		wantLen:  1,
+	}, {
+		name:     "from_external_for_external",
+		want:     "host1.example.net.",
+		question: net.IP{254, 253, 252, 251},
+		cliIP:    net.IP{254, 253, 252, 255},
+		wantLen:  1,
+	}}
+
+	for _, tc := range testCases {
+		reqAddr, err := dns.ReverseAddr(tc.question.String())
+		require.NoError(t, err)
+		req := createTestMessageWithType(reqAddr, dns.TypePTR)
+
+		pctx := &proxy.DNSContext{
+			Proto: proxy.ProtoTCP,
+			Req:   req,
+			Addr: &net.TCPAddr{
+				IP: tc.cliIP,
+			},
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			err = s.handleDNSRequest(nil, pctx)
+			require.Nil(t, err)
+			require.NotNil(t, pctx.Res)
+			require.Len(t, pctx.Res.Answer, tc.wantLen)
+			if tc.wantLen > 0 {
+				assert.Equal(t, tc.want, pctx.Res.Answer[0].Header().Name)
+			}
+		})
+	}
 }

@@ -5,12 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
 	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
 	"github.com/AdguardTeam/dnsproxy/proxy"
-	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/miekg/dns"
 )
@@ -26,6 +24,9 @@ type dnsContext struct {
 	// origResp is the response received from upstream.  It is set when the
 	// response is modified by filters.
 	origResp *dns.Msg
+	// unreversedReqIP stores an IP address obtained from PTR request if it
+	// was successfully parsed.
+	unreversedReqIP net.IP
 	// err is the error returned from a processing function.
 	err error
 	// clientID is the clientID from DOH, DOQ, or DOT, if provided.
@@ -77,11 +78,12 @@ func (s *Server) handleDNSRequest(_ *proxy.Proxy, d *proxy.DNSContext) error {
 	// appropriate handler.
 	mods := []modProcessFunc{
 		processInitial,
-		processInternalHosts,
-		processInternalIPAddrs,
+		s.processInternalHosts,
+		s.processRestrictLocal,
+		s.processInternalIPAddrs,
 		processClientID,
 		processFilteringBeforeRequest,
-		processLocalPTR,
+		s.processLocalPTR,
 		processUpstream,
 		processDNSSECAfterResponse,
 		processFilteringAfterResponse,
@@ -186,9 +188,31 @@ func (s *Server) onDHCPLeaseChanged(flags int) {
 	s.tablePTRLock.Unlock()
 }
 
+// hostToIP tries to get an IP leased by DHCP and returns the copy of address
+// since the data inside the internal table may be changed while request
+// processing.  It's safe for concurrent use.
+func (s *Server) hostToIP(host string) (ip net.IP, ok bool) {
+	s.tableHostToIPLock.Lock()
+	defer s.tableHostToIPLock.Unlock()
+
+	if s.tableHostToIP == nil {
+		return nil, false
+	}
+
+	var ipFromTable net.IP
+	ipFromTable, ok = s.tableHostToIP[host]
+	if !ok {
+		return nil, false
+	}
+
+	ip = make(net.IP, 4)
+	copy(ip, ipFromTable)
+
+	return ip, true
+}
+
 // Respond to A requests if the target host name is associated with a lease from our DHCP server
-func processInternalHosts(ctx *dnsContext) (rc resultCode) {
-	s := ctx.srv
+func (s *Server) processInternalHosts(ctx *dnsContext) (rc resultCode) {
 	req := ctx.proxyCtx.Req
 	if !(req.Question[0].Qtype == dns.TypeA || req.Question[0].Qtype == dns.TypeAAAA) {
 		return resultCodeSuccess
@@ -199,15 +223,12 @@ func processInternalHosts(ctx *dnsContext) (rc resultCode) {
 	if !strings.HasSuffix(host, ".lan.") {
 		return resultCodeSuccess
 	}
+
+	// TODO(e.burkov): Restrict the access for external clients.
+
 	host = strings.TrimSuffix(host, ".lan.")
 
-	s.tableHostToIPLock.Lock()
-	if s.tableHostToIP == nil {
-		s.tableHostToIPLock.Unlock()
-		return resultCodeSuccess
-	}
-	ip, ok := s.tableHostToIP[host]
-	s.tableHostToIPLock.Unlock()
+	ip, ok := s.hostToIP(host)
 	if !ok {
 		return resultCodeSuccess
 	}
@@ -215,51 +236,100 @@ func processInternalHosts(ctx *dnsContext) (rc resultCode) {
 	log.Debug("DNS: internal record: %s -> %s", req.Question[0].Name, ip)
 
 	resp := s.makeResponse(req)
-
 	if req.Question[0].Qtype == dns.TypeA {
-		a := &dns.A{}
-		a.Hdr = dns.RR_Header{
-			Name:   req.Question[0].Name,
-			Rrtype: dns.TypeA,
-			Ttl:    s.conf.BlockedResponseTTL,
-			Class:  dns.ClassINET,
+		a := &dns.A{
+			Hdr: dns.RR_Header{
+				Name:   req.Question[0].Name,
+				Rrtype: dns.TypeA,
+				Ttl:    s.conf.BlockedResponseTTL,
+				Class:  dns.ClassINET,
+			},
+			A: ip,
 		}
-		a.A = make([]byte, 4)
-		copy(a.A, ip)
 		resp.Answer = append(resp.Answer, a)
 	}
 
 	ctx.proxyCtx.Res = resp
+
 	return resultCodeSuccess
 }
 
-// Respond to PTR requests if the target IP address is leased by our DHCP server
-func processInternalIPAddrs(ctx *dnsContext) (rc resultCode) {
-	s := ctx.srv
-	req := ctx.proxyCtx.Req
-	if req.Question[0].Qtype != dns.TypePTR {
+// processRestrictLocal responds with empty answers to PTR requests for IP
+// addresses in locally-served network from external clients.
+func (s *Server) processRestrictLocal(ctx *dnsContext) (rc resultCode) {
+	d := ctx.proxyCtx
+	req := d.Req
+	q := req.Question[0]
+	if q.Qtype != dns.TypePTR {
+		// No need for restriction.
 		return resultCodeSuccess
 	}
 
-	arpa := req.Question[0].Name
-	ip := aghnet.UnreverseAddr(arpa)
+	ip := aghnet.UnreverseAddr(q.Name)
+	if ip == nil {
+		// That's weird.
+		//
+		// TODO(e.burkov): Research the cases when it could happen.
+		return resultCodeSuccess
+	}
+
+	// Restrict an access to local addresses for external clients.  We also
+	// assume that all the DHCP leases we give are locally-served or at
+	// least don't need to be unaccessable externally.
+	if s.ipDetector.IsLocallyServedNetwork(ip) {
+		clientIP := IPFromAddr(d.Addr)
+		if !s.ipDetector.IsLocallyServedNetwork(clientIP) {
+			log.Debug("dns: %q requests for internal ip", clientIP)
+			d.Res = s.makeResponse(req)
+
+			// Do not even put into query log.
+			return resultCodeFinish
+		}
+	}
+
+	// Do not perform unreversing ever again.
+	ctx.unreversedReqIP = ip
+
+	// Nothing to restrict.
+	return resultCodeSuccess
+}
+
+// ipToHost tries to get a hostname leased by DHCP.  It's safe for concurrent
+// use.
+func (s *Server) ipToHost(ip net.IP) (host string, ok bool) {
+	s.tablePTRLock.Lock()
+	defer s.tablePTRLock.Unlock()
+
+	if s.tablePTR == nil {
+		return "", false
+	}
+
+	host, ok = s.tablePTR[ip.String()]
+
+	return host, ok
+}
+
+// Respond to PTR requests if the target IP is leased by our DHCP server and the
+// requestor is inside the local network.
+func (s *Server) processInternalIPAddrs(ctx *dnsContext) (rc resultCode) {
+	d := ctx.proxyCtx
+	if d.Res != nil {
+		return resultCodeSuccess
+	}
+
+	ip := ctx.unreversedReqIP
 	if ip == nil {
 		return resultCodeSuccess
 	}
 
-	s.tablePTRLock.Lock()
-	if s.tablePTR == nil {
-		s.tablePTRLock.Unlock()
-		return resultCodeSuccess
-	}
-	host, ok := s.tablePTR[ip.String()]
-	s.tablePTRLock.Unlock()
+	host, ok := s.ipToHost(ip)
 	if !ok {
 		return resultCodeSuccess
 	}
 
-	log.Debug("DNS: reverse-lookup: %s -> %s", arpa, host)
+	log.Debug("dns: dhcp lease for %q is %q", ip, host)
 
+	req := d.Req
 	resp := s.makeResponse(req)
 	ptr := &dns.PTR{
 		Hdr: dns.RR_Header{
@@ -268,98 +338,40 @@ func processInternalIPAddrs(ctx *dnsContext) (rc resultCode) {
 			Ttl:    s.conf.BlockedResponseTTL,
 			Class:  dns.ClassINET,
 		},
-		Ptr: host + ".",
+		Ptr: dns.Fqdn(host),
 	}
-
 	resp.Answer = append(resp.Answer, ptr)
-	ctx.proxyCtx.Res = resp
+	d.Res = resp
+
 	return resultCodeSuccess
 }
 
-// DefaultLocalTimeout is the default timeout to be used for local upstreams.
-const DefaultLocalTimeout = 5 * time.Second
-
 // processLocalPTR responds to PTR requests if the target IP is detected to be
-// inside the local network.
-func processLocalPTR(ctx *dnsContext) (rc resultCode) {
+// inside the local network and the query was not answered from DHCP.
+func (s *Server) processLocalPTR(ctx *dnsContext) (rc resultCode) {
 	d := ctx.proxyCtx
 	if d.Res != nil {
 		return resultCodeSuccess
 	}
 
+	ip := ctx.unreversedReqIP
+	if ip == nil {
+		return resultCodeSuccess
+	}
+
+	if !s.ipDetector.IsLocallyServedNetwork(ip) {
+		return resultCodeSuccess
+	}
+
 	req := d.Req
-	if req.Question[0].Qtype != dns.TypePTR {
-		return resultCodeSuccess
+	resp, err := s.localResolvers.Exchange(req)
+	if err != nil {
+		ctx.err = err
+
+		return resultCodeError
 	}
 
-	target := aghnet.UnreverseAddr(req.Question[0].Name)
-	s := ctx.srv
-	if !s.ipDetector.DetectLocallyServedNetwork(target) {
-		return resultCodeSuccess
-	}
-	// The address wasn't resolved by DHCP because it is not enabled.  Start
-	// working.
-
-	resolversAddrs := s.systemResolvers.Get()
-	var err error
-	if len(resolversAddrs) == 0 {
-		err = s.systemResolvers.Refresh()
-		if err != nil {
-			log.Error("dns: process local address: %s", err)
-
-			return resultCodeSuccess
-		}
-
-		resolversAddrs = s.systemResolvers.Get()
-	}
-
-	// TODO(e.burkov): Prepend the addresses of local resolvers from the
-	// configuration, when it will be added.
-	var uerrs, eerrs []error
-	for _, addr := range resolversAddrs {
-		// Check if the addr is not our own address.
-		if addr == s.dnsFilter.Config.ResolverAddress {
-			continue
-		}
-
-		var ups upstream.Upstream
-		ups, err = upstream.AddressToUpstream(
-			addr,
-			upstream.Options{
-				Timeout: DefaultLocalTimeout,
-			},
-		)
-		if err != nil {
-			uerrs = append(uerrs, err)
-
-			continue
-		}
-
-		var resp *dns.Msg
-		resp, err = ups.Exchange(req)
-		if err != nil {
-			eerrs = append(eerrs, err)
-
-			continue
-		}
-
-		// TODO(e.burkov): Maybe mark the upstreams causing errors as
-		// useless or something.
-
-		if resp != nil {
-			d.Res = resp
-
-			return resultCodeSuccess
-		}
-
-	}
-
-	if len(uerrs) > 0 {
-		log.Error("dnsforward: %s", agherr.Many("can't create upstreams", uerrs...))
-	}
-	if len(eerrs) > 0 {
-		log.Error("dnsforward: %s", agherr.Many("can't exchange with upstreams", eerrs...))
-	}
+	d.Res = resp
 
 	return resultCodeSuccess
 }

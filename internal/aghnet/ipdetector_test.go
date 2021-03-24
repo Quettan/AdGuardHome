@@ -136,7 +136,7 @@ func TestIPDetector_DetectSpecialNetwork(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, ipd.DetectSpecialNetwork(tc.ip))
+			assert.Equal(t, tc.want, ipd.IsSpecialNetwork(tc.ip))
 		})
 	}
 }
@@ -209,7 +209,7 @@ func TestIPDetector_DetectLocallyServedNetwork(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, ipd.DetectLocallyServedNetwork(tc.ip))
+			assert.Equal(t, tc.want, ipd.IsLocallyServedNetwork(tc.ip))
 		})
 	}
 }
@@ -220,27 +220,25 @@ func TestIPDetector_Detect_parallel(t *testing.T) {
 	ipd, err := NewIPDetector()
 	require.Nil(t, err)
 
-	testFunc := func(t *testing.T) {
-		assert.NotPanics(t, func() {
-			for _, ip := range []net.IP{
-				net.IPv4allrouter,
-				net.IPv4allsys,
-				net.IPv4bcast,
-				net.IPv4zero,
-				net.IPv6interfacelocalallnodes,
-				net.IPv6linklocalallnodes,
-				net.IPv6linklocalallrouters,
-				net.IPv6loopback,
-				net.IPv6unspecified,
-			} {
-				ipd.DetectSpecialNetwork(ip)
-				ipd.DetectLocallyServedNetwork(ip)
-			}
-		})
+	testFunc := func() {
+		for _, ip := range []net.IP{
+			net.IPv4allrouter,
+			net.IPv4allsys,
+			net.IPv4bcast,
+			net.IPv4zero,
+			net.IPv6interfacelocalallnodes,
+			net.IPv6linklocalallnodes,
+			net.IPv6linklocalallrouters,
+			net.IPv6loopback,
+			net.IPv6unspecified,
+		} {
+			_ = ipd.IsSpecialNetwork(ip)
+			_ = ipd.IsLocallyServedNetwork(ip)
+		}
 	}
 
 	const goroutinesNum = 50
 	for i := 0; i < goroutinesNum; i++ {
-		go testFunc(t)
+		go testFunc()
 	}
 }

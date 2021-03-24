@@ -67,11 +67,11 @@ func initDNSServer() error {
 	Context.dnsFilter = dnsfilter.New(&filterConf, nil)
 
 	p := dnsforward.DNSCreateParams{
-		DNSFilter:       Context.dnsFilter,
-		Stats:           Context.stats,
-		QueryLog:        Context.queryLog,
-		IPDetector:      Context.ipDetector,
-		SystemResolvers: Context.systemResolvers,
+		DNSFilter:      Context.dnsFilter,
+		Stats:          Context.stats,
+		QueryLog:       Context.queryLog,
+		IPDetector:     Context.ipDetector,
+		LocalResolvers: Context.localResolvers,
 	}
 	if Context.dhcpServer != nil {
 		p.DHCPServer = Context.dhcpServer
@@ -109,10 +109,10 @@ func onDNSRequest(d *proxy.DNSContext) {
 	}
 
 	ipd := Context.ipDetector
-	if !ipd.DetectLocallyServedNetwork(ip) {
+	if !ipd.IsLocallyServedNetwork(ip) {
 		Context.rdns.Begin(ip)
 	}
-	if !ipd.DetectSpecialNetwork(ip) {
+	if !ipd.IsSpecialNetwork(ip) {
 		Context.whois.Begin(ip)
 	}
 }
@@ -344,10 +344,10 @@ func startDNSServer() error {
 
 	const topClientsNumber = 100 // the number of clients to get
 	for _, ip := range Context.stats.GetTopClientsIP(topClientsNumber) {
-		if !Context.ipDetector.DetectLocallyServedNetwork(ip) {
+		if !Context.ipDetector.IsLocallyServedNetwork(ip) {
 			Context.rdns.Begin(ip)
 		}
-		if !Context.ipDetector.DetectSpecialNetwork(ip) {
+		if !Context.ipDetector.IsSpecialNetwork(ip) {
 			Context.whois.Begin(ip)
 		}
 	}

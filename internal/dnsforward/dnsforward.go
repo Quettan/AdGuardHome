@@ -57,9 +57,9 @@ type Server struct {
 	stats      stats.Stats
 	access     *accessCtx
 
-	ipset           ipsetCtx
-	ipDetector      *aghnet.IPDetector
-	systemResolvers aghnet.SystemResolvers
+	ipset          ipsetCtx
+	ipDetector     *aghnet.IPDetector
+	localResolvers aghnet.LocalResolvers
 
 	tableHostToIP     map[string]net.IP // "hostname -> IP" table for internal addresses (DHCP)
 	tableHostToIPLock sync.Mutex
@@ -79,23 +79,23 @@ type Server struct {
 
 // DNSCreateParams - parameters for NewServer()
 type DNSCreateParams struct {
-	DNSFilter       *dnsfilter.DNSFilter
-	Stats           stats.Stats
-	QueryLog        querylog.QueryLog
-	DHCPServer      dhcpd.ServerInterface
-	IPDetector      *aghnet.IPDetector
-	SystemResolvers aghnet.SystemResolvers
+	DNSFilter      *dnsfilter.DNSFilter
+	Stats          stats.Stats
+	QueryLog       querylog.QueryLog
+	DHCPServer     dhcpd.ServerInterface
+	IPDetector     *aghnet.IPDetector
+	LocalResolvers aghnet.LocalResolvers
 }
 
 // NewServer creates a new instance of the dnsforward.Server
 // Note: this function must be called only once
 func NewServer(p DNSCreateParams) *Server {
 	s := &Server{
-		dnsFilter:       p.DNSFilter,
-		stats:           p.Stats,
-		queryLog:        p.QueryLog,
-		ipDetector:      p.IPDetector,
-		systemResolvers: p.SystemResolvers,
+		dnsFilter:      p.DNSFilter,
+		stats:          p.Stats,
+		queryLog:       p.QueryLog,
+		ipDetector:     p.IPDetector,
+		localResolvers: p.LocalResolvers,
 	}
 
 	if p.DHCPServer != nil {
@@ -166,7 +166,6 @@ func (s *Server) Resolve(host string) ([]net.IPAddr, error) {
 // Query log and Stats are not updated.
 // This method may be called before Start().
 func (s *Server) Exchange(req *dns.Msg) (*dns.Msg, error) {
-	log.Debug("INTERNAL PROXY RESOLVES")
 	s.RLock()
 	defer s.RUnlock()
 

@@ -274,6 +274,9 @@ func SplitHost(hostport string) (host string, err error) {
 	return host, nil
 }
 
+// TODO(e.burkov): Inspect the charToHex, ipParseARPA6, ipReverse and
+// UnreverseAddr and maybe refactor it.
+
 // charToHex converts character to a hexadecimal.
 func charToHex(n byte) int8 {
 	if n >= '0' && n <= '9' {
