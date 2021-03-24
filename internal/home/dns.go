@@ -90,7 +90,7 @@ func initDNSServer() error {
 		return fmt.Errorf("dnsServer.Prepare: %w", err)
 	}
 
-	Context.rdns = InitRDNS(Context.dnsServer, &Context.clients)
+	Context.rdns = NewRDNS(Context.dnsServer, &Context.clients, Context.ipDetector, Context.localResolvers)
 	Context.whois = initWhois(&Context.clients)
 
 	Context.filters.Init()
@@ -108,11 +108,10 @@ func onDNSRequest(d *proxy.DNSContext) {
 		return
 	}
 
-	ipd := Context.ipDetector
-	if !ipd.IsLocallyServedNetwork(ip) {
+	if !ip.IsLoopback() {
 		Context.rdns.Begin(ip)
 	}
-	if !ipd.IsSpecialNetwork(ip) {
+	if !Context.ipDetector.IsSpecialNetwork(ip) {
 		Context.whois.Begin(ip)
 	}
 }
